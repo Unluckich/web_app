@@ -1,18 +1,17 @@
 import os
 import logging
-import threading
 import asyncio
+import threading
+import time
 from queue import Queue, Empty
 from flask import Flask, render_template, request, redirect, url_for, abort, make_response
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding
-from base64 import b64decode
 from telegram import Bot
-from telegram.request import HTTPXRequest
+from base64 import b64decode
 from asyncio import run_coroutine_threadsafe
-import time
 
-# ============ НАЛАШТУВАННЯ ============
+# =================== НАЛАШТУВАННЯ ===================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 KEYS_DIR = os.path.join(BASE_DIR, "keys")
 PRIVATE_KEY_PATH = os.path.join(KEYS_DIR, "private_key.pem")
@@ -20,52 +19,24 @@ PUBLIC_KEY_PATH = os.path.join(KEYS_DIR, "public_key.pem")
 
 TELEGRAM_BOT_TOKEN = "7888461204:AAEf1X2YtlV4-DMc6A5LQuQAqMU7bTJ4Tdg"
 ADMIN_USER_IDS = [797316319]
-# ======================================
+# ======================================================
 
 app = Flask(__name__)
 app.logger.setLevel(logging.INFO)
 
-# Telegram Bot з пулом з’єднань
-request = HTTPXRequest(connection_pool_size=10)
-bot = Bot(token=TELEGRAM_BOT_TOKEN, request=request)
-
-# Event loop для Telegram-бота
+# Ініціалізуємо Telegram Bot API (асинхронний Bot)
+bot = Bot(token=TELEGRAM_BOT_TOKEN)
 bot_loop = asyncio.new_event_loop()
-
-# Черга повідомлень
 message_queue = Queue()
 
 
-@app.before_first_request
-def startup():
-    """Запускає event loop і воркер для черги повідомлень."""
-    threading.Thread(target=bot_loop.run_forever, daemon=True).start()
-    threading.Thread(target=telegram_worker, daemon=True).start()
-
-
-def telegram_worker():
-    """Постійно обробляє чергу повідомлень і надсилає їх ботом."""
-    while True:
-        try:
-            chat_id, text = message_queue.get(timeout=1)
-            future = run_coroutine_threadsafe(
-                bot.send_message(chat_id=chat_id, text=text),
-                bot_loop
-            )
-            future.result(timeout=10)
-            app.logger.info(f"✅ Надіслано повідомлення до {chat_id}")
-        except Empty:
-            continue  # Немає нових повідомлень
-        except Exception as e:
-            app.logger.error(f"❌ Помилка надсилання повідомлення: {e}")
-        finally:
-            time.sleep(0.1)  # Щоб не перевантажувати CPU
-
-
 def load_private_key():
-    """Завантажує приватний ключ."""
     with open(PRIVATE_KEY_PATH, "rb") as key_file:
-        return serialization.load_pem_private_key(key_file.read(), password=None)
+        private_key = serialization.load_pem_private_key(
+            key_file.read(),
+            password=None
+        )
+    return private_key
 
 
 @app.after_request
@@ -83,6 +54,7 @@ def report_form():
             public_pem = f.read()
     except FileNotFoundError:
         abort(500, description="Публічний ключ не знайдено на сервері.")
+
     return render_template("report.html", public_key=public_pem)
 
 
@@ -95,11 +67,16 @@ def submit_report():
     try:
         encrypted_bytes = b64decode(encrypted_b64)
     except Exception as e:
-        app.logger.error(f"Помилка декодування base64: {e}")
-        abort(400, description="Некоректне кодування повідомлення.")
+        app.logger.error(f"Помилка dekodування base64: {e}")
+        abort(400, description="Неможливо розшифрувати повідомлення (некоректний формат).")
+
+    private_key = load_private_key()
 
     try:
-        decrypted = load_private_key().decrypt(encrypted_bytes, padding.PKCS1v15())
+        decrypted = private_key.decrypt(
+            encrypted_bytes,
+            padding.PKCS1v15()
+        )
         plain_text = decrypted.decode("utf-8")
     except Exception as e:
         app.logger.error(f"Помилка розшифровки: {e}")
@@ -107,9 +84,15 @@ def submit_report():
 
     app.logger.info(f"Розшифрований текст: {plain_text}")
 
+    sent_count = 0
     for admin_id in ADMIN_USER_IDS:
-        message_queue.put((admin_id, f"📧 Повідомлення з форми:\n\n{plain_text}"))
+        try:
+            message_queue.put((admin_id, f"📧 Повідомлення з форми:\n\n{plain_text}"))
+            sent_count += 1
+        except Exception as e:
+            app.logger.error(f"Не вдалося поставити в чергу для {admin_id}: {e}")
 
+    app.logger.info(f"Повідомлення було розшифровано та поставлено в чергу {sent_count} адміністраторам.")
     return redirect(url_for("thank_you"))
 
 
@@ -117,16 +100,43 @@ def submit_report():
 def thank_you():
     html = """
     <html>
-      <head><meta charset="utf-8"><title>Дякуємо!</title></head>
+      <head>
+        <meta charset="utf-8">
+        <title>Дякуємо!</title>
+      </head>
       <body>
         <h2>Дякуємо, ваше повідомлення успішно надіслано.</h2>
         <p>Ми отримаємо його і якнайшвидше відповімо.</p>
       </body>
     </html>
     """
-    return make_response(html)
+    response = make_response(html)
+    return response
+
+
+def telegram_worker():
+    while True:
+        try:
+            chat_id, text = message_queue.get(timeout=1)
+            future = run_coroutine_threadsafe(
+                bot.send_message(chat_id=chat_id, text=text),
+                bot_loop
+            )
+            future.result(timeout=10)
+            app.logger.info(f"✅ Надіслано повідомлення до {chat_id}")
+        except Empty:
+            continue
+        except Exception as e:
+            app.logger.error(f"❌ Помилка надсилання повідомлення: {e}")
+        finally:
+            time.sleep(0.1)
+
+
+def start_background_threads():
+    threading.Thread(target=bot_loop.run_forever, daemon=True).start()
+    threading.Thread(target=telegram_worker, daemon=True).start()
 
 
 if __name__ == "__main__":
+    start_background_threads()
     app.run(host="0.0.0.0", port=5000, debug=True)
-

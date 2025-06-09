@@ -1,10 +1,8 @@
-# web_app/app.py
-
 import os
 import logging
-import asyncio  # <- додаємо
+import asyncio
 from flask import Flask, render_template, request, redirect, url_for, abort, make_response
-from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from telegram import Bot
 from base64 import b64decode
@@ -20,9 +18,15 @@ ADMIN_USER_IDS = [797316319]
 # ======================================================
 
 app = Flask(__name__)
+# Генеруємо зовнішні URL із правильним доменом
+app.config.update({
+    "PREFERRED_URL_SCHEME": "https",
+    "SERVER_NAME": "web-app-d8fd.onrender.com"
+})
+
 app.logger.setLevel(logging.INFO)
 
-# Ініціалізуємо Telegram Bot API (це асинхронний Bot з бібліотеки python-telegram-bot v20+)
+# Ініціалізуємо Telegram Bot API (асинхронний Bot v20+)
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
 
@@ -38,9 +42,6 @@ def load_private_key():
 
 @app.after_request
 def add_no_cache_headers(response):
-    """
-    Додаємо заголовки, щоб заборонити кешування.
-    """
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     response.headers["Pragma"] = "no-cache"
     response.headers["Expires"] = "0"
@@ -49,10 +50,6 @@ def add_no_cache_headers(response):
 
 @app.route("/report", methods=["GET"])
 def report_form():
-    """
-    Віддаємо HTML-сторінку з формою.
-    Передаємо у шаблон public_key у PEM-форматі.
-    """
     try:
         with open(PUBLIC_KEY_PATH, "r") as f:
             public_pem = f.read()
@@ -64,10 +61,6 @@ def report_form():
 
 @app.route("/submit", methods=["POST"])
 def submit_report():
-    """
-    Приймаємо POST із зашифрованим текстом.
-    Розшифровуємо його і надсилаємо адміністраторам через Telegram Bot API.
-    """
     encrypted_b64 = request.form.get("encrypted_message")
     if not encrypted_b64:
         abort(400, description="Не надійшло поле encrypted_message.")
@@ -93,7 +86,6 @@ def submit_report():
     app.logger.info(f"Розшифрований текст: {plain_text}")
 
     sent_count = 0
-    # Викликаємо bot.send_message() через asyncio.run(), щоб дочекатися виконання корутини
     for admin_id in ADMIN_USER_IDS:
         try:
             asyncio.run(bot.send_message(chat_id=admin_id, text=f"📧 Повідомлення з форми:\n\n{plain_text}"))
@@ -104,7 +96,8 @@ def submit_report():
 
     app.logger.info(f"Повідомлення було розшифровано та надіслано {sent_count} адміністраторам.")
 
-    return redirect(url_for("thank_you"))
+    # Редірект на зовнішній URL thank_you
+    return redirect(url_for("thank_you", _external=True))
 
 
 @app.route("/thankyou", methods=["GET"])
@@ -121,10 +114,10 @@ def thank_you():
       </body>
     </html>
     """
-    response = make_response(html)
-    return response
+    return make_response(html)
 
 
 if __name__ == "__main__":
-    # Запускаємо Flask. Для продакшену бажано вже через HTTPS + gunicorn/uwsgi
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    # У продакшені запускайте через Gunicorn/Nginx; тут для HTTPS на Render
+    app.run(host="0.0.0.0", port=443, debug=False,
+            ssl_context=(os.path.join(BASE_DIR, 'cert.pem'), os.path.join(BASE_DIR, 'key.pem')))

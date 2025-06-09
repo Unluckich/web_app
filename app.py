@@ -13,12 +13,16 @@ KEYS_DIR = os.path.join(BASE_DIR, "keys")
 PRIVATE_KEY_PATH = os.path.join(KEYS_DIR, "private_key.pem")
 PUBLIC_KEY_PATH = os.path.join(KEYS_DIR, "public_key.pem")
 
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "7888461204:AAEf1X2YtlV4-DMc6A5LQuQAqMU7bTJ4Tdg")
+# Токен Telegram-бота можна задавати через ENV для безпеки
+TELEGRAM_BOT_TOKEN = os.environ.get(
+    "TELEGRAM_BOT_TOKEN",
+    "7888461204:AAEf1X2YtlV4-DMc6A5LQuQAqMU7bTJ4Tdg"
+)
 ADMIN_USER_IDS = [797316319]
 # ======================================================
 
 app = Flask(__name__)
-# Генеруємо зовнішні URL із правильним доменом
+# Налаштування для генерації зовнішніх URL
 app.config.update({
     "PREFERRED_URL_SCHEME": "https",
     "SERVER_NAME": "web-app-d8fd.onrender.com"
@@ -26,7 +30,7 @@ app.config.update({
 
 app.logger.setLevel(logging.INFO)
 
-# Ініціалізуємо Telegram Bot API (асинхронний Bot v20+)
+# Ініціалізуємо бот Telegram (асинхронна версія)
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
 
@@ -34,8 +38,7 @@ def load_private_key():
     """Завантажує приватний ключ із файла (PKCS#8)."""
     with open(PRIVATE_KEY_PATH, "rb") as key_file:
         private_key = serialization.load_pem_private_key(
-            key_file.read(),
-            password=None
+            key_file.read(), password=None
         )
     return private_key
 
@@ -51,11 +54,9 @@ def add_no_cache_headers(response):
 @app.route("/report", methods=["GET"])
 def report_form():
     try:
-        with open(PUBLIC_KEY_PATH, "r") as f:
-            public_pem = f.read()
+        public_pem = open(PUBLIC_KEY_PATH, "r").read()
     except FileNotFoundError:
         abort(500, description="Публічний ключ не знайдено на сервері.")
-
     return render_template("report.html", public_key=public_pem)
 
 
@@ -68,35 +69,27 @@ def submit_report():
     try:
         encrypted_bytes = b64decode(encrypted_b64)
     except Exception as e:
-        app.logger.error(f"Помилка dekodування base64: {e}")
+        app.logger.error(f"Помилка декодування base64: {e}")
         abort(400, description="Неможливо розшифрувати повідомлення (некоректний формат).")
 
     private_key = load_private_key()
-
     try:
-        decrypted = private_key.decrypt(
-            encrypted_bytes,
-            padding.PKCS1v15()
-        )
+        decrypted = private_key.decrypt(encrypted_bytes, padding.PKCS1v15())
         plain_text = decrypted.decode("utf-8")
     except Exception as e:
         app.logger.error(f"Помилка розшифровки: {e}")
         abort(400, description="Не вдалося розшифрувати повідомлення.")
 
     app.logger.info(f"Розшифрований текст: {plain_text}")
-
     sent_count = 0
     for admin_id in ADMIN_USER_IDS:
         try:
-            asyncio.run(bot.send_message(chat_id=admin_id, text=f"📧 Повідомлення з форми: {plain_text}"))
-            app.logger.info(f"Відправлено адміну {admin_id}")
+            asyncio.run(bot.send_message(chat_id=admin_id, text=f"📧 Повідомлення з форми:\n\n{plain_text}"))
             sent_count += 1
         except Exception as e:
             app.logger.error(f"Не вдалося надіслати адміну {admin_id}: {e}")
 
-    app.logger.info(f"Повідомлення було розшифровано та надіслано {sent_count} адміністраторам.")
-
-    # Редірект на зовнішній URL thank_you
+    app.logger.info(f"Надіслано {sent_count} адміністраторам.")
     return redirect(url_for("thank_you", _external=True))
 
 
@@ -104,10 +97,7 @@ def submit_report():
 def thank_you():
     html = """
     <html>
-      <head>
-        <meta charset="utf-8">
-        <title>Дякуємо!</title>
-      </head>
+      <head><meta charset="utf-8"><title>Дякуємо!</title></head>
       <body>
         <h2>Дякуємо, ваше повідомлення успішно надіслано.</h2>
         <p>Ми отримаємо його і якнайшвидше відповімо.</p>
@@ -118,6 +108,6 @@ def thank_you():
 
 
 if __name__ == "__main__":
-    # Render керує HTTPS/SSL та портом через ENV PORT — запускаємо звичайний HTTP
+    # Render керує HTTPS та портом через змінну PORT
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)

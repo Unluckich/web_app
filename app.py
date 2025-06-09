@@ -13,7 +13,7 @@ KEYS_DIR = os.path.join(BASE_DIR, "keys")
 PRIVATE_KEY_PATH = os.path.join(KEYS_DIR, "private_key.pem")
 PUBLIC_KEY_PATH = os.path.join(KEYS_DIR, "public_key.pem")
 
-TELEGRAM_BOT_TOKEN = "7888461204:AAEf1X2YtlV4-DMc6A5LQuQAqMU7bTJ4Tdg"
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "7888461204:AAEf1X2YtlV4-DMc6A5LQuQAqMU7bTJ4Tdg")
 ADMIN_USER_IDS = [797316319]
 # ======================================================
 
@@ -88,7 +88,7 @@ def submit_report():
     sent_count = 0
     for admin_id in ADMIN_USER_IDS:
         try:
-            asyncio.run(bot.send_message(chat_id=admin_id, text=f"📧 Повідомлення з форми:\n\n{plain_text}"))
+            asyncio.run(bot.send_message(chat_id=admin_id, text=f"📧 Повідомлення з форми: {plain_text}"))
             app.logger.info(f"Відправлено адміну {admin_id}")
             sent_count += 1
         except Exception as e:
@@ -118,6 +118,6 @@ def thank_you():
 
 
 if __name__ == "__main__":
-    # У продакшені запускайте через Gunicorn/Nginx; тут для HTTPS на Render
-    app.run(host="0.0.0.0", port=443, debug=False,
-            ssl_context=(os.path.join(BASE_DIR, 'cert.pem'), os.path.join(BASE_DIR, 'key.pem')))
+    # Render керує HTTPS/SSL та портом через ENV PORT — запускаємо звичайний HTTP
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)

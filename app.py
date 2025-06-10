@@ -3,10 +3,11 @@ import logging
 import asyncio
 import threading
 import time
-from queue import Queue, Empty
+import redis
 from flask import Flask, render_template, request, redirect, url_for, abort, make_response
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.fernet import Fernet
 from telegram import Bot
 from base64 import b64decode
 from asyncio import run_coroutine_threadsafe
@@ -16,28 +17,49 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 KEYS_DIR = os.path.join(BASE_DIR, "keys")
 PRIVATE_KEY_PATH = os.path.join(KEYS_DIR, "private_key.pem")
 PUBLIC_KEY_PATH = os.path.join(KEYS_DIR, "public_key.pem")
+FERNET_KEY_PATH = os.path.join(KEYS_DIR, "fernet.key")
 
-TELEGRAM_BOT_TOKEN = "7888461204:AAEf1X2YtlV4-DMc6A5LQuQAqMU7bTJ4Tdg"
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "7888461204:AAEf1X2YtlV4-DMc6A5LQuQAqMU7bTJ4Tdg")
 ADMIN_USER_IDS = [797316319]
+
+# Redis settings
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+REDIS_DB = int(os.getenv("REDIS_DB", 0))
+QUEUE_KEY = "telegram_queue"
 # ======================================================
 
 app = Flask(__name__)
 app.logger.setLevel(logging.INFO)
 
+# Підключення до Redis
+redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB)
+
+# Завантаження/генерація ключа Fernet для внутрішнього шифрування черги
+
+def load_fernet_key():
+    if not os.path.exists(FERNET_KEY_PATH):
+        key = Fernet.generate_key()
+        with open(FERNET_KEY_PATH, "wb") as f:
+            f.write(key)
+    else:
+        with open(FERNET_KEY_PATH, "rb") as f:
+            key = f.read()
+    return key
+
+fernet = Fernet(load_fernet_key())
+
 # Ініціалізуємо Telegram Bot API (асинхронний Bot)
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 bot_loop = asyncio.new_event_loop()
-message_queue = Queue()
 
+# =================== Функції ===================
 
 def load_private_key():
     with open(PRIVATE_KEY_PATH, "rb") as key_file:
-        private_key = serialization.load_pem_private_key(
-            key_file.read(),
-            password=None
+        return serialization.load_pem_private_key(
+            key_file.read(), password=None
         )
-    return private_key
-
 
 @app.after_request
 def add_no_cache_headers(response):
@@ -46,7 +68,6 @@ def add_no_cache_headers(response):
     response.headers["Expires"] = "0"
     return response
 
-
 @app.route("/report", methods=["GET"])
 def report_form():
     try:
@@ -54,9 +75,7 @@ def report_form():
             public_pem = f.read()
     except FileNotFoundError:
         abort(500, description="Публічний ключ не знайдено на сервері.")
-
     return render_template("report.html", public_key=public_pem)
-
 
 @app.route("/submit", methods=["POST"])
 def submit_report():
@@ -71,7 +90,6 @@ def submit_report():
         abort(400, description="Неможливо розшифрувати повідомлення (некоректний формат).")
 
     private_key = load_private_key()
-
     try:
         decrypted = private_key.decrypt(
             encrypted_bytes,
@@ -82,60 +100,54 @@ def submit_report():
         app.logger.error(f"Помилка розшифровки: {e}")
         abort(400, description="Не вдалося розшифрувати повідомлення.")
 
-    app.logger.info(f"Розшифрований текст: {plain_text}")
+    # Шифруємо текст для Redis-черги
+    payload = plain_text.encode('utf-8')
+    encrypted_payload = fernet.encrypt(payload)
+    redis_client.lpush(QUEUE_KEY, encrypted_payload)
+    app.logger.info("Повідомлення зашифровано і додано в Redis-чергу.")
 
-    sent_count = 0
-    for admin_id in ADMIN_USER_IDS:
-        try:
-            message_queue.put((admin_id, f"📧 Повідомлення з форми:\n\n{plain_text}"))
-            sent_count += 1
-        except Exception as e:
-            app.logger.error(f"Не вдалося поставити в чергу для {admin_id}: {e}")
-
-    app.logger.info(f"Повідомлення було розшифровано та поставлено в чергу {sent_count} адміністраторам.")
     return redirect(url_for("thank_you"))
-
 
 @app.route("/thankyou", methods=["GET"])
 def thank_you():
     html = """
     <html>
-      <head>
-        <meta charset="utf-8">
-        <title>Дякуємо!</title>
-      </head>
+      <head><meta charset="utf-8"><title>Дякуємо!</title></head>
       <body>
         <h2>Дякуємо, ваше повідомлення успішно надіслано.</h2>
         <p>Ми отримаємо його і якнайшвидше відповімо.</p>
       </body>
     </html>
     """
-    response = make_response(html)
-    return response
+    return make_response(html)
 
-
+# Фоновий воркер для обробки Redis-черги
 def telegram_worker():
     while True:
         try:
-            chat_id, text = message_queue.get(timeout=1)
-            future = run_coroutine_threadsafe(
-                bot.send_message(chat_id=chat_id, text=text),
-                bot_loop
-            )
-            future.result(timeout=10)
-            app.logger.info(f"✅ Надіслано повідомлення до {chat_id}")
-        except Empty:
-            continue
+            item = redis_client.brpop(QUEUE_KEY, timeout=1)
+            if not item:
+                continue
+            _, encrypted_payload = item
+            # Дешифруємо перед відправкою
+            text = fernet.decrypt(encrypted_payload).decode('utf-8')
+
+            for admin_id in ADMIN_USER_IDS:
+                future = run_coroutine_threadsafe(
+                    bot.send_message(chat_id=admin_id, text=f"📧 Повідомлення з форми:\n\n{text}"),
+                    bot_loop
+                )
+                future.result(timeout=10)
+                app.logger.info(f"✅ Надіслано повідомлення до {admin_id}")
         except Exception as e:
-            app.logger.error(f"❌ Помилка надсилання повідомлення: {e}")
+            app.logger.error(f"❌ Помилка обробки Redis-черги: {e}")
         finally:
             time.sleep(0.1)
 
-
+# Запуск бекграундних потоків
 def start_background_threads():
     threading.Thread(target=bot_loop.run_forever, daemon=True).start()
     threading.Thread(target=telegram_worker, daemon=True).start()
-
 
 if __name__ == "__main__":
     start_background_threads()
